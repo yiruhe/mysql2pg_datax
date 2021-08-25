@@ -73,31 +73,60 @@ public class MysqlReader extends Reader {
 
     }
 
-    private static String getGeometryFromInputStream(InputStream inputStream) throws Exception {
+    private static Geometry getGeometryFromInputStream(InputStream inputStream) throws Exception {
+
+        Geometry dbGeometry = null;
 
         if (inputStream != null) {
+
             // 把二进制流转成字节数组
             //convert the stream to a byte[] array
             //so it can be passed to the WKBReader
-            byte[] buffer = new byte[inputStream.available()];
+            byte[] buffer = new byte[255];
 
             int bytesRead = 0;
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             while ((bytesRead = inputStream.read(buffer)) != -1) {
                 baos.write(buffer, 0, bytesRead);
             }
+
             // 得到字节数组
             byte[] geometryAsBytes = baos.toByteArray();
             // 字节数组小于5，说明geometry有问题
             if (geometryAsBytes.length < 5) {
                 throw new Exception("Invalid geometry inputStream - less than five bytes");
             }
-            String s = DatatypeConverter.printHexBinary(geometryAsBytes);
 
-            return s;
+            //first four bytes of the geometry are the SRID,
+            //followed by the actual WKB.  Determine the SRID
+            //这里是取字节数组的前4个来解析srid
+            byte[] sridBytes = new byte[4];
+            System.arraycopy(geometryAsBytes, 0, sridBytes, 0, 4);
+            boolean bigEndian = (geometryAsBytes[4] == 0x00);
+            // 解析srid
+            int srid = 0;
+            if (bigEndian) {
+                for (int i = 0; i < sridBytes.length; i++) {
+                    srid = (srid << 8) + (sridBytes[i] & 0xff);
+                }
+            } else {
+                for (int i = 0; i < sridBytes.length; i++) {
+                    srid += (sridBytes[i] & 0xff) << (8 * i);
+                }
+            }
+
+            //use the JTS WKBReader for WKB parsing
+            WKBReader wkbReader = new WKBReader();
+            // 使用geotool的WKBReader 把字节数组转成geometry对象。
+            //copy the byte array, removing the first four
+            //SRID bytes
+            byte[] wkb = new byte[geometryAsBytes.length - 4];
+            System.arraycopy(geometryAsBytes, 4, wkb, 0, wkb.length);
+            dbGeometry = wkbReader.read(wkb);
+            dbGeometry.setSRID(srid);
         }
 
-        return "";
+        return dbGeometry;
     }
 
     public static class Task extends Reader.Task {
@@ -122,8 +151,8 @@ public class MysqlReader extends Reader {
                             if("GEOMETRY".equalsIgnoreCase(cTypeName)){
                                 InputStream inputStream = rs.getBinaryStream(i);
                                 // 转换为geometry对象
-                                String geometryFromInputStream = getGeometryFromInputStream(inputStream);
-                                record.addColumn(new StringColumn(geometryFromInputStream));
+                                Geometry geometryFromInputStream = getGeometryFromInputStream(inputStream);
+                                record.addColumn(new StringColumn(geometryFromInputStream.toText()));
                                 continue;
                             }
 
